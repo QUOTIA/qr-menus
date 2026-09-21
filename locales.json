@@ -5,7 +5,16 @@
       "name": "TANGER BOCATERIA",
       "url": "https://tangerbocateria.food/#menu",
       "text": "Escanea para ver la carta",
-      "slug": "tanger-bocateria"
+      "slug": "tanger-bocateria",
+      "locked": true
+    },
+    {
+      "id": "9519e1dc-132a-4e69-9c66-fbba36cfa27f",
+      "name": "Canceller",
+      "url": "https://hotelceferino.com/wp-content/uploads/2025/07/Carta-restaurant-catala-castella.pdf",
+      "text": "Escanea para ver la carta",
+      "slug": "canceller",
+      "locked": true
     }
   ]
 }
