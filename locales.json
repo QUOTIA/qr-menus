@@ -15,6 +15,14 @@
       "text": "Escanea para ver la carta",
       "slug": "canceller",
       "locked": true
+    },
+    {
+      "id": "0ca22b51-b902-423e-97f4-17a4428c2147",
+      "name": "CASTELLOLI KARTING HUMOR PAINTBALL",
+      "url": "https://search.google.com/local/writereview?placeid=ChIJXaGi_PVnpBIRLoiE-9lx1eI",
+      "text": "Escanea para ver la carta",
+      "slug": "castelloli-karting-humor-paintball",
+      "locked": true
     }
   ]
 }
