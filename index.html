@@ -2707,7 +2707,7 @@ const slugify = (s) => s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]
 const b64enc = (s) => { const b = new TextEncoder().encode(s); let t = ''; b.forEach((x) => t += String.fromCharCode(x)); return btoa(t); };
 const b64dec = (s) => new TextDecoder().decode(Uint8Array.from(atob(s.replace(/\n/g, '')), (c) => c.charCodeAt(0)));
 
-let st = { cfg: null, locales: [], sel: null, msg: null, busy: false, ready: false };
+let st = { cfg: null, locales: [], deleted: [], sel: null, msg: null, busy: false, ready: false };
 try { st.cfg = JSON.parse(localStorage.getItem('qrmenu') || 'null'); } catch {}
 const saveCfg = () => { try { localStorage.setItem('qrmenu', JSON.stringify(st.cfg)); } catch {} };
 
@@ -2735,9 +2735,7 @@ async function connect(token, repo) {
     await new Promise((x) => setTimeout(x, 2500));
   }
   const idx = await gh('GET', repoPath() + '/contents/index.html');
-  if (!idx.ok && SELF) {
-    need(await gh('PUT', repoPath() + '/contents/index.html', { message: 'Instalar QRMenu', content: SELF }), 'No se pudo subir la app');
-  }
+  if (SELF) await installSelf(idx.ok ? idx.json.sha : undefined);
   const repoInfo = need(await gh('GET', repoPath()), 'Error');
   const pg = await gh('POST', repoPath() + '/pages', { source: { branch: repoInfo.json.default_branch, path: '/' } });
   if (!pg.ok && pg.status !== 409) throw new Error('No se pudo activar GitHub Pages: ' + (pg.json?.message || pg.status));
@@ -2745,9 +2743,15 @@ async function connect(token, repo) {
   await loadLocales();
 }
 
+async function installSelf(sha) {
+  need(await gh('PUT', repoPath() + '/contents/index.html', { message: 'Actualizar QRMenu', content: SELF, sha }), 'No se pudo subir la app');
+}
+
 async function loadLocales() {
   const r = await gh('GET', repoPath() + '/contents/locales.json');
-  st.locales = r.ok ? JSON.parse(b64dec(r.json.content)).locales || [] : [];
+  if (r.status === 404) st.locales = [];
+  else { need(r, 'No se pudo leer la lista de locales'); st.locales = (JSON.parse(b64dec(r.json.content)).locales || []).map((x) => ({ ...x, locked: true })); }
+  st.deleted = [];
   st.ready = true;
 }
 
@@ -2764,14 +2768,27 @@ async function publish() {
   const parent = ref.json.object.sha;
   const pc = need(await gh('GET', `${repoPath()}/git/commits/${parent}`), 'Error');
   const old = need(await gh('GET', `${repoPath()}/git/trees/${pc.json.tree.sha}?recursive=1`), 'Error');
-  const files = { '.nojekyll': '', 'locales.json': JSON.stringify({ locales: st.locales }, null, 2) };
-  for (const l of st.locales) files[`r/${l.slug}/index.html`] = redirectPage(l);
+  // Lista real guardada en GitHub: nunca se pierde un local que ya estaba publicado
+  let remote = [];
+  const e = old.json.tree.find((t) => t.path === 'locales.json');
+  if (e) remote = JSON.parse(b64dec(need(await gh('GET', `${repoPath()}/git/blobs/${e.sha}`), 'Error leyendo la lista').json.content)).locales || [];
+  const gone = new Set(st.deleted.map((d) => d.id));
+  const mine = st.locales.filter((x) => !x.draft);
+  const ids = new Set(mine.map((x) => x.id));
+  const merged = [...remote.filter((x) => !ids.has(x.id) && !gone.has(x.id)), ...mine.filter((x) => !gone.has(x.id))];
+  merged.forEach((l) => l.locked = true);
+  const slugs = new Set();
+  for (const x of merged) { if (slugs.has(x.slug)) throw new Error('Identificador repetido: ' + x.slug); slugs.add(x.slug); }
+  const files = { '.nojekyll': '', 'locales.json': JSON.stringify({ locales: merged }, null, 2) };
+  for (const l of merged) files[`r/${l.slug}/index.html`] = redirectPage(l);
   const tree = Object.entries(files).map(([path, content]) => ({ path, mode: '100644', type: 'blob', content }));
-  for (const t of old.json.tree) if (t.type === 'blob' && t.path.startsWith('r/') && !(t.path in files)) tree.push({ path: t.path, mode: '100644', type: 'blob', sha: null });
+  for (const d of st.deleted) { const p = `r/${d.slug}/index.html`; if (!(p in files) && old.json.tree.some((t) => t.path === p)) tree.push({ path: p, mode: '100644', type: 'blob', sha: null }); }
   const nt = need(await gh('POST', repoPath() + '/git/trees', { base_tree: pc.json.tree.sha, tree }), 'Error creando el árbol');
   const c = need(await gh('POST', repoPath() + '/git/commits', { message: 'Actualizar cartas', tree: nt.json.sha, parents: [parent] }), 'Error en el commit');
   need(await gh('PATCH', `${repoPath()}/git/refs/heads/${branch}`, { sha: c.json.sha }), 'Error actualizando');
-  st.locales.forEach((l) => l.locked = true);
+  merged.forEach((l) => l.locked = true);
+  st.locales = [...merged, ...st.locales.filter((x) => x.draft)];
+  st.deleted = [];
 }
 
 // ---------- QR y exportación ----------
@@ -2817,11 +2834,22 @@ function render() {
   const l = st.locales.find((x) => x.id === st.sel);
   app.innerHTML = `<aside><h2>Locales</h2><div id="list">${st.locales.map((x) => `<div class="item ${x.id === st.sel ? 'sel' : ''}" data-id="${x.id}"><b>${esc(x.name)}</b><small>${esc(x.url)}</small></div>`).join('') || '<p style="color:#888;padding:8px;font-size:13px">Aún no hay locales.</p>'}</div>
   <div style="padding:12px;border-top:1px solid #e3e5e8;display:flex;gap:8px"><button class="p" id="add" style="flex:1">+ Nuevo local</button><button id="out" title="Cerrar sesión">⎋</button></div></aside>
-  <main>${banner()}${l ? editor(l) : `<div class="card"><h2 style="margin-top:0">QRMenu</h2><p style="font-size:14px;line-height:1.6">Crea un local con la URL de su carta, pulsa <b>Guardar y publicar</b> y descarga su QR. Si la carta cambia, edita la URL y vuelve a publicar: los QR impresos siguen funcionando.</p></div>`}</main>`;
+  <main>${banner()}${l ? '<button id="back" style="margin-bottom:14px">← Volver a todos los locales</button>' + editor(l) : home()}</main>`;
+  if ($('#back')) $('#back').onclick = () => { st.locales = st.locales.filter((x) => !x.draft); st.sel = null; st.msg = null; render(); };
+  document.querySelectorAll('.card[data-id]').forEach((e) => e.onclick = () => { st.sel = e.dataset.id; st.msg = null; render(); });
+  if ($('#upd')) $('#upd').onclick = async () => { $('#upd').disabled = true; try { const r = await gh('GET', repoPath() + '/contents/index.html'); await installSelf(r.ok ? r.json.sha : undefined); say('ok', 'Web actualizada. Recarga la dirección de GitHub Pages en 1-2 minutos.'); } catch (e) { say('err', errMsg(e)); } };
   document.querySelectorAll('.item').forEach((e) => e.onclick = () => { st.sel = e.dataset.id; st.msg = null; render(); });
-  $('#add').onclick = () => { const n = { id: crypto.randomUUID(), name: '', url: '', text: 'Escanea para ver la carta', slug: '', draft: true }; st.locales.push(n); st.sel = n.id; st.msg = null; render(); };
-  $('#out').onclick = () => { if (confirm('¿Cerrar sesión en este navegador?')) { localStorage.removeItem('qrmenu'); st = { cfg: null, locales: [], sel: null, msg: null, ready: false }; render(); } };
+  const newLocal = () => { const n = { id: crypto.randomUUID(), name: '', url: '', text: 'Escanea para ver la carta', slug: '', draft: true }; st.locales.push(n); st.sel = n.id; st.msg = null; render(); };
+  $('#add').onclick = newLocal; if ($('#add2')) $('#add2').onclick = newLocal;
+  $('#out').onclick = () => { if (confirm('¿Cerrar sesión en este navegador?')) { localStorage.removeItem('qrmenu'); st = { cfg: null, locales: [], deleted: [], sel: null, msg: null, ready: false }; render(); } };
   if (l) bindEditor(l);
+}
+
+function home() {
+  const done = st.locales.filter((x) => x.locked);
+  return `<h2 style="margin-top:0">Todos los locales</h2>
+  ${done.length ? '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px;max-width:760px">' + done.map((x) => '<div class="card" data-id="' + x.id + '" style="cursor:pointer;margin:0"><b>' + esc(x.name) + '</b><div class="url" style="margin-top:6px">' + esc(x.url) + '</div></div>').join('') + '</div>' : '<div class="card"><p style="font-size:14px;line-height:1.6;margin:0">Crea un local con la URL de su carta, pulsa <b>Guardar y publicar</b> y descarga su QR. Si la carta cambia, edita la URL y vuelve a publicar: los QR impresos siguen funcionando.</p></div>'}
+  <div class="row"><button class="p" id="add2">+ Nuevo local</button>${SELF ? '<button id="upd" title="Sube esta versión de la página a tu GitHub Pages">Actualizar la web publicada</button>' : ''}</div>`;
 }
 
 function editor(l) {
@@ -2856,9 +2884,9 @@ function bindEditor(l) {
   };
   $('#del').onclick = async () => {
     if (!l.draft && !confirm(`¿Eliminar "${l.name || 'este local'}"? Su QR dejará de funcionar.`)) return;
-    const i = st.locales.indexOf(l); st.locales.splice(i, 1); st.sel = null;
+    const i = st.locales.indexOf(l); st.locales.splice(i, 1); st.sel = null; const dEntry = { id: l.id, slug: l.slug }; st.deleted.push(dEntry);
     if (l.draft) return render();
-    try { await publish(); say('ok', 'Eliminado.'); } catch (e) { st.locales.splice(i, 0, l); say('err', errMsg(e)); }
+    try { await publish(); say('ok', 'Eliminado.'); } catch (e) { st.locales.splice(i, 0, l); st.deleted = st.deleted.filter((d) => d !== dEntry); say('err', errMsg(e)); }
   };
 }
 
